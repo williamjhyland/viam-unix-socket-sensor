@@ -15,20 +15,21 @@ from viam.errors import NoCaptureToStoreError
 
 LOGGER = getLogger(__name__)
 
-class myThread(threading.Thread):
+class SocketThread(threading.Thread):
 
     def __init__(self, name, socket_file, bufsize, encoding):
         threading.Thread.__init__(self)
         # Thread Info
         self.name = name
         self.running = False
+        self.connected = False
         self.lock = threading.Lock()
         # Socket Info
         self.client_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket_file = socket_file
         self.bufsize = bufsize
         self.encoding = encoding
-        self.reconnect_interval = 5
+        self.reconnect_interval = 1
         self.latest_reading = None
         self.buffer = ""
     
@@ -36,17 +37,18 @@ class myThread(threading.Thread):
         LOGGER.info(f"Starting thread of {self.name}")
         self.running = True
         while self.running:
+            LOGGER.debug(f"Trying Connection -- self.Connected status is {self.connected}")
             self.connect_to_server()
             time.sleep(self.reconnect_interval)
 
     def shutdown(self):
-        LOGGER.info('shutting down Socket Client & joining threads')
+        LOGGER.info('Shutting down thread.')
         self.running = False
-        self.client_socket.close()
-        self.join()
+        if self.client_socket:
+            self.client_socket.close()
 
     def loop(self):
-        while self.running:
+        while self.running and self.connected:
             try:
                 data = self.client_socket.recv(self.bufsize)
                 if not data:
@@ -60,17 +62,21 @@ class myThread(threading.Thread):
                         self.latest_reading = self.parse_response(lines[-2])
             except socket.error as e:
                 LOGGER.error(f"Failed to receive data: {e}")
-                self.shutdown()
+                self.connected = False
 
     def connect_to_server(self):
-        while self.running:
-            try:
-                self.client_socket.connect(self.socket_file)
-                LOGGER.info('Connected to Unix socket server')
-                self.loop()
-            except socket.error as e:
-                LOGGER.error(f"Socket error: {e}")
-                self.shutdown()
+        try:
+            self.client_socket.connect(self.socket_file)
+            LOGGER.info('Connected to Unix socket server')
+            self.connected = True
+        except ConnectionRefusedError as cre:
+            LOGGER.error(f"ConnectionRefusedError: is the server online? {cre}")
+            self.connected = False        
+        except OSError as ose:
+            LOGGER.debug(f"OS error: {ose}")
+            self.connected = True
+
+        self.loop()
 
     def receive_data(self) -> Optional[str]:
         while self.running:
@@ -79,12 +85,12 @@ class myThread(threading.Thread):
                 self.buffer += data.decode(self.encoding)
                 lines = self.buffer.split('\n')
                 self.buffer = lines[-1]
-
                 if len(lines) > 1:
-                    self.latest_reading = self.parse_response(lines[-2])
+                    with self.lock:
+                        self.latest_reading = self.parse_response(lines[-2])
             except socket.error as e:
                 LOGGER.error(f"Failed to receive data: {e}")
-                self.shutdown()
+                self.connected = False
 
     def parse_response(self, response: str) -> Optional[Dict[str, Any]]:
         try:
@@ -103,7 +109,7 @@ class MySensor(Sensor):
         self.bufsize: int = 1024
         self.encoding: str = "utf-8"
         self.process_response: bool = False
-        self.thread: Optional[myThread] = None
+        self.thread: Optional[SocketThread] = None
         self.buffer = ""
 
     @classmethod
@@ -143,57 +149,23 @@ class MySensor(Sensor):
         self.encoding = config_dict["encoding"]
 
         # Initialize and configure the Unix socket
-        self.thread = myThread(self.name, self.socket_file, self.bufsize, self.encoding)
-        LOGGER.info("Starting")
+        self.thread = SocketThread(self.name, self.socket_file, self.bufsize, self.encoding)
         self.thread.start()
-        LOGGER.info("Started")
 
     async def get_readings(self, extra: Optional[Dict[str, Any]] = None, **kwargs) -> Mapping[str, Any]:
-        if not self.thread or not self.thread.running:
-            LOGGER.error(f"Thread not properly initialized or running on component: {self.name}")
+        if not self.thread:
+            LOGGER.error(f"Thread not properly initialized on component: {self.name}. Shutting down.")
+            raise NoCaptureToStoreError
+        
+        if not self.thread.connected:
+            LOGGER.error(f"Socket not connected on component: {self.name}.")
             raise NoCaptureToStoreError
 
         if self.thread.latest_reading is not None:
             return self.thread.latest_reading
         else:
-            LOGGER.debug("No data received from Unix socket sensor")
+            LOGGER.info("No data received from Unix socket sensor")
             raise NoCaptureToStoreError
-
-'''
-
-    def send_data(self, command: str) -> None:
-        try:
-            # Send a command to the server to request data
-            self.sock.sendall(command.encode(self.encoding))
-        except socket.error as e:
-            LOGGER.error(f"Failed to send data: {e}")
-
-    def receive_data(self) -> Optional[str]:
-        try:
-            data = self.sock.recv(self.bufsize)
-            self.buffer += data.decode(self.encoding)
-            
-            # Split the buffer on the newline character
-            lines = self.buffer.split('\n')
-            self.buffer = lines[-1]  # Save the last partial line back to the buffer
-
-            # Return the latest complete line
-            if len(lines) > 1:
-                return lines[-2]
-            return None
-        except socket.timeout:
-            LOGGER.debug("Socket timeout, no response received.")
-            return None
-        except socket.error as e:
-            LOGGER.error(f"Failed to receive data: {e}")
-            return f"Failed to receive data: {e}"
-
-    @staticmethod
-    def parse_response(response: str) -> Optional[Dict[str, Any]]:
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError as e:
-            LOGGER.error(f"Error processing response: {e} - Response: {response}")
-            return None
         
-'''
+    async def close(self):
+        self.thread.shutdown()

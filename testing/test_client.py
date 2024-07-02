@@ -25,6 +25,11 @@ def main():
 
     try:
         while True:
+            try:
+                client_socket.connect(socket_file)
+            except OSError as e:
+                print(e)
+                pass
             # Capture the time the request is sent
             request_time = time.time()  # Using time.time() for higher precision
 
