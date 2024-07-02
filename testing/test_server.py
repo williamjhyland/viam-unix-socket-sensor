@@ -51,7 +51,6 @@ while True:
             connection.sendall(json_data.encode('utf-8'))
             
             # Wait for 10 milliseconds before sending the next piece of data
-            time.sleep(0.01)
     except BrokenPipeError:
         # Handle case where client disconnects
         print(f'Client {client_address} disconnected')
