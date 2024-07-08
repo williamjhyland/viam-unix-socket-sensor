@@ -1,59 +1,81 @@
 import socket
 import os
+import threading
 import time
-from datetime import datetime
 import json
+from datetime import datetime
+from typing import Any, Dict
 
-# Define the Unix socket file path
-socket_file = '/tmp/unix_socket_example'
+class UnixSocketServer(threading.Thread):
+    def __init__(self, socket_file, bufsize, encoding):
+        threading.Thread.__init__(self)
+        self.socket_file = socket_file
+        self.bufsize = bufsize
+        self.encoding = encoding
+        self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.clients = []
 
-# Ensure the socket does not already exist
-try:
-    os.unlink(socket_file)
-except OSError:
-    if os.path.exists(socket_file):
-        raise
+        # Ensure the socket does not already exist
+        try:
+            os.unlink(self.socket_file)
+        except OSError:
+            if os.path.exists(self.socket_file):
+                raise
 
-# Create a Unix domain socket
-server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    def run(self):
+        self.server_socket.bind(self.socket_file)
+        self.server_socket.listen()
+        print(f"Server started and listening at {self.socket_file}")
 
-# Bind the socket to the file path
-server_socket.bind(socket_file)
+        while True:
+            client_socket, _ = self.server_socket.accept()
+            self.clients.append(client_socket)
+            client_thread = threading.Thread(target=self.handle_client, args=(client_socket,))
+            client_thread.start()
 
-# Listen for incoming connections
-server_socket.listen(1)
+    def handle_client(self, client_socket):
+        with client_socket:
+            while True:
+                try:
+                    data = self.get_sample_data()
+                    client_socket.sendall(data.encode(self.encoding))
+                    time.sleep(.1)  # Simulate some delay between sends
+                except socket.error as e:
+                    print(f"Socket error: {e}")
+                    break
 
-print(f'Server is listening at {socket_file}')
+    def get_sample_data(self) -> str:
+        # Replace with actual data generation logic
+        sample_data: Dict[str, Any] = {
+            "user": "example_user",
+            "time": datetime.now().strftime('%H:%M:%S.%f')[:-3],
+            "meat_type": "beef",
+            "doneness": "medium-rare",
+            "sear_level": "high",
+            "cook_time": 360,  # example in seconds
+            "rest_time": 180,  # example in seconds
+            "thickness": 1.5  # example in inches
+        }
+        return json.dumps(sample_data) + "\n"
 
-while True:
-    # Accept a connection
-    connection, client_address = server_socket.accept()
-    print(f'Connection from {client_address}')
+    def shutdown(self):
+        for client_socket in self.clients:
+            client_socket.close()
+        self.server_socket.close()
+        if os.path.exists(self.socket_file):
+            os.unlink(self.socket_file)
+        print("Server shut down")
+
+if __name__ == "__main__":
+    socket_file = "/tmp/my_unix_socket"
+    bufsize = 1024
+    encoding = "utf-8"
+
+    server = UnixSocketServer(socket_file, bufsize, encoding)
+    server.start()
 
     try:
         while True:
-            # Generate data (example values provided)
-            data = {
-                "user": "example_user",
-                "time": datetime.now().strftime('%H:%M:%S.%f')[:-3],
-                "meat_type": "beef",
-                "doneness": "medium-rare",
-                "sear_level": "high",
-                "cook_time": 360,  # example in seconds
-                "rest_time": 180,  # example in seconds
-                "thickness": 1.5  # example in inches
-            }
-            
-            # Convert dictionary to JSON string
-            json_data = json.dumps(data) + '\n'  # Adding newline for easier splitting in the client
-            
-            # Send data to the client
-            connection.sendall(json_data.encode('utf-8'))
-            
-            # Wait for 10 milliseconds before sending the next piece of data
-    except BrokenPipeError:
-        # Handle case where client disconnects
-        print(f'Client {client_address} disconnected')
-    finally:
-        # Clean up the connection
-        connection.close()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        server.shutdown()

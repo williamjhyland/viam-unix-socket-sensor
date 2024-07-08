@@ -2,6 +2,7 @@ import socket
 import json
 import threading
 import time
+import errno
 from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence
 from typing_extensions import Self
 from viam.components.sensor import Sensor
@@ -29,7 +30,7 @@ class SocketThread(threading.Thread):
         self.socket_file = socket_file
         self.bufsize = bufsize
         self.encoding = encoding
-        self.reconnect_interval = 1
+        self.reconnect_interval = .1
         self.latest_reading = None
         self.buffer = ""
     
@@ -73,8 +74,15 @@ class SocketThread(threading.Thread):
             LOGGER.error(f"ConnectionRefusedError: is the server online? {cre}")
             self.connected = False        
         except OSError as ose:
-            LOGGER.debug(f"OS error: {ose}")
-            self.connected = True
+            if ose.errno == errno.ENOENT:  # Error number for "No such file or directory"
+                LOGGER.error(f"OS error (No such file or directory): {ose}")
+                self.connected = False
+            elif ose.errno == 56:  # Error number for "Socket is already connected"
+                LOGGER.debug(f"OS error (Socket is already connected): {ose}")
+                self.connected = True
+            else:
+                LOGGER.error(f"OS error: {ose}")
+                self.connected = False
 
         self.loop()
 
@@ -168,4 +176,6 @@ class MySensor(Sensor):
             raise NoCaptureToStoreError
         
     async def close(self):
-        self.thread.shutdown()
+        LOGGER.info("Closing sensor and shutting down thread")
+        if self.thread:
+            self.thread.shutdown()
